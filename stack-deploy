@@ -85,7 +85,7 @@ def update_stack(session, stack_name, stack_file, wait, stack_id):
 def get_diff_stack(session, stack, template_body, show_full=False):
     client = session.client('cloudformation')
 
-    current_template = client.read_template(StackName=stack)['TemplateBody']
+    current_template = client.get_template(StackName=stack)['TemplateBody']
     current_template_json = json.dumps(current_template, sort_keys=True, indent=4, separators=(',', ': '))
 
     diff = []
