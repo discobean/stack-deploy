@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='stack-deploy',
-    version='0.1',
+    version='0.1.1',
     scripts=['stack-deploy'],
     install_requires=[
         'appdirs==1.4.0',
