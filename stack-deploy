@@ -1,0 +1,219 @@
+#!/usr/bin/env python2.7
+import boto3, os, sys, re, logging, botocore, json, difflib, argparse, yaml
+from termcolor import cprint
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
+
+def get_stack_id(session, stack_name):
+    client = session.client('cloudformation')
+
+    try:
+        # check if the stack exists
+        response = client.describe_stacks(StackName=stack_name)
+
+        if len(response['Stacks']) > 1:
+            raise Exception('More than 1 stack is available with the same name: %s, I cant deal with that!' % stack_name)
+
+        return response['Stacks'][0]['StackId']
+
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'ValidationError':
+            return None
+
+    return None
+
+def create_stack(session, stack_name, stack_file, wait):
+    client = session.client('cloudformation')
+
+    _, contents = read_template(stack_file)
+
+    logger.info("Creation of new stack starting")
+    response = client.create_stack(
+            StackName=stack_name,
+            TemplateBody=contents,
+            Capabilities=['CAPABILITY_IAM'],
+            OnFailure='DELETE'
+        )
+    logger.info("Stack ID: " + response['StackId'])
+    print "Stack ID: " + response['StackId']
+    print "https://console.aws.amazon.com/cloudformation/home?region=ap-southeast-2#/stack/detail?stackId=%s" % response['StackId']
+
+    waiter = client.get_waiter('stack_create_complete')
+    waiter.wait(StackName=response['StackId'])
+
+    logger.info("Finished creating stack")
+    print "Finished creating stack"
+
+    return response['StackId']
+
+def update_stack(session, stack_name, stack_file, wait, stack_id):
+    client = session.client('cloudformation')
+
+    _, contents = read_template(stack_file)
+
+    try:
+        logger.info("Update of existing stack starting")
+        response = client.update_stack(
+                StackName=stack_name,
+                TemplateBody=contents,
+                Capabilities=['CAPABILITY_IAM']
+            )
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'ValidationError':
+            if re.match('.*No updates are to be performed.*', str(e)):
+                logger.info("No updates are to be performed for the stack")
+                return stack_id
+
+        logger.exception(e)
+        raise(e)
+
+    logger.info("Stack ID: " + response['StackId'])
+    print "Stack ID: " + response['StackId']
+    print "https://console.aws.amazon.com/cloudformation/home?region=ap-southeast-2#/stack/detail?stackId=%s" % response['StackId']
+
+    waiter = client.get_waiter('stack_update_complete')
+    waiter.wait(StackName=stack_id)
+
+    logger.info("Finished updating stack")
+    print "Finished updating stack"
+
+    return response['StackId']
+
+
+def get_diff_stack(session, stack, template_body, show_full=False):
+    client = session.client('cloudformation')
+
+    current_template = client.read_template(StackName=stack)['TemplateBody']
+    current_template_json = json.dumps(current_template, sort_keys=True, indent=4, separators=(',', ': '))
+
+    diff = []
+    try:
+        new_template = json.loads(template_body)
+        new_template_json = json.dumps(new_template, sort_keys=True, indent=4, separators=(',', ': '))
+
+        d = difflib.Differ()
+        diff = list(d.compare(current_template_json.splitlines(True), new_template_json.splitlines(True)))
+    except: # if not JSON
+        d = difflib.Differ()
+        diff = list(d.compare(current_template.splitlines(True), template_body.splitlines(True)))
+
+
+    if ''.join(diff) == '':
+        return None
+
+    if show_full:
+        return ''.join(diff)
+    else:
+        changes = [l for l in diff if l.startswith('+ ') or l.startswith('- ')]
+        return ''.join(changes)
+
+def deploy_stack(session, template, wait=True):
+    client = session.client('cloudformation')
+
+    stack, template_body = read_template(template)
+
+    if wait:
+        logger.info("wait=True, so will wait for stack to finish")
+    else:
+        logger.info("wait=False, not waiting for stack to finish")
+
+    stack_id = get_stack_id(session, stack)
+
+    if stack_id:
+        logger.info("Stack already exists, StackID: %s, updating" % stack_id)
+        cprint("update-stack: %s (%s)" % (stack, template), 'green')
+
+        result = update_stack(session, stack, template, wait, stack_id)
+    else:
+        logger.info("Stack does not yet exist, creating")
+        cprint("create-stack: %s (%s)" % (stack, template), 'green')
+        create_stack(session, stack, template, wait)
+
+    return True
+
+def read_template(template):
+    if not os.path.exists(template):
+        logger.error('Stack template does not exist: ' + template)
+        return False
+
+    # find the template name from the (everything before .)
+    # e.g xyx.template = xyx or abc-234.template = abc-234
+    matches = re.match('([^\.]+).*', os.path.basename(template))
+    stack = matches.group(1)
+
+    template_contents = open(template).read(1024000)
+    return stack, template_contents
+
+    try:
+        template_object = json.reads(template_contents)
+    except:
+        try:
+            template_object = yaml.load(template_contents)
+        except:
+            raise Exception("Failed to read template, not JSON or YAML")
+
+    template_body = json.dumps(template_object, sort_keys=True,
+            indent=4, separators=(',', ': '))
+
+    # max 51,200 byte for CF stacks using inline boto3 updates
+    size = sys.getsizeof(template_body)
+    if size > 51200:
+        raise Exception("Template to large for stack-deploy, actual %sB, max size 51200" % size)
+
+    return stack, template_body
+
+def show_diff(session, template):
+    client = session.client('cloudformation')
+    stack, template_body = read_template(template)
+
+    stack_id = get_stack_id(session, stack)
+
+    if stack_id:
+        logger.info("Stack already exists, StackID: %s, updating" % stack_id)
+        cprint("update-stack: %s (%s)" % (stack, template), 'green')
+
+        diff = get_diff_stack(session, stack, template_body)
+        if diff:
+            cprint(diff, 'yellow')
+        else:
+            cprint('# no changes', 'yellow')
+    else:
+        diff = []
+        try:
+            new_template = json.loads(template_body)
+            new_template_json = json.dumps(new_template, sort_keys=True, indent=4, separators=(',', ': '))
+
+            d = difflib.Differ()
+            diff = list(d.compare([], new_template_json.splitlines(True)))
+
+        except: # if not JSON
+            d = difflib.Differ()
+            diff = list(d.compare([], template_body.splitlines(True)))
+
+        logger.info("Stack does not yet exist, creating")
+        cprint("create-stack: %s (%s)" % (stack, template), 'green')
+        cprint(''.join(diff), 'yellow')
+
+if __name__ == '__main__':
+    session = boto3.Session()
+
+    parser = argparse.ArgumentParser(description='Updates and/or creates stacks based on your generated templates')
+
+    parser.add_argument('-f', '--file', nargs='+', required=True, help='List of CF templates to run')
+    parser.add_argument('-w', '--wait', required=False, action='store_true', help='Wait for stack to be finished before moving to the next stack')
+
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument('-d', '--delete', required=False, action='store_true', help="Delete the stack") # TODO add this feature
+    group.add_argument('-u', '--update', required=False, action='store_true', help="Execute the updates predicted in --diff")
+
+    args = parser.parse_args()
+
+    for template in args.file:
+
+        if not args.delete and not args.update:
+            show_diff(session, template)
+
+        if args.update:
+            deploy_stack(session, template)
