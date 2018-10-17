@@ -17,6 +17,16 @@ stack-deploy -f *
 
 This will print a diff of any changes that will be made to your CF stacks
 
+## Docker
+````
+docker build -t stack-deploy .
+
+cd /my-stacks-directory
+docker run -v $(pwd):/stacks -v ~/.aws:/root/.aws -ti stack-deploy
+
+# then run stack-deploy as usual
+````
+
 ## examples (update the stack)
 Same as above, but run `stack-deploy -f * -u`, which will update the stacks
 
