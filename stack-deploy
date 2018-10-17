@@ -33,7 +33,7 @@ def create_stack(session, stack_name, stack_file, wait):
     response = client.create_stack(
             StackName=stack_name,
             TemplateBody=contents,
-            Capabilities=['CAPABILITY_IAM'],
+            Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM'],
             OnFailure='DELETE'
         )
     logger.info("Stack ID: " + response['StackId'])
@@ -58,7 +58,7 @@ def update_stack(session, stack_name, stack_file, wait, stack_id):
         response = client.update_stack(
                 StackName=stack_name,
                 TemplateBody=contents,
-                Capabilities=['CAPABILITY_IAM']
+                Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM']
             )
     except botocore.exceptions.ClientError as e:
         if e.response['Error']['Code'] == 'ValidationError':
